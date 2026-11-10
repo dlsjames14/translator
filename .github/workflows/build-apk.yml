@@ -1,0 +1,65 @@
+# Builds the Android app in the cloud every time you push (or when you press
+# "Run workflow" on the Actions tab), then publishes ScreenTranslator.apk on
+# the repository's Releases page so you can download it straight to your phone.
+# The app can be at the top of the repository or inside any folder: it's found automatically.
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Find the app folder
+        run: |
+          settings=$(find . -name settings.gradle.kts -not -path './.git/*' | awk '{ print length, $0 }' | sort -n | head -n 1 | cut -d' ' -f2-)
+          if [ -z "$settings" ]; then
+            echo "::error::Couldn't find the app in this repository (no settings.gradle.kts file)."
+            exit 1
+          fi
+          dir=$(dirname "$settings")
+          if [ ! -f "$dir/gradlew" ]; then
+            echo "::error::Found the app in $dir, but the gradlew file is missing there."
+            exit 1
+          fi
+          echo "APP_DIR=$dir" >> "$GITHUB_ENV"
+          echo "Building the app in: $dir"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build the APK
+        run: |
+          cd "$APP_DIR"
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/ScreenTranslator.apk"
+
+      - name: Keep a copy with this run
+        uses: actions/upload-artifact@v7
+        with:
+          name: ScreenTranslator-apk
+          path: ScreenTranslator.apk
+
+      - name: Publish on the Releases page
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk --repo "${{ github.repository }}" --yes --cleanup-tag || true
+          gh release create apk ScreenTranslator.apk \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Screen Translator (build ${{ github.run_number }})" \
+            --notes "Open this page on your Android phone, tap ScreenTranslator.apk to download it, then open the file to install." \
+            --latest
