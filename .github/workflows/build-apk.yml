@@ -33,7 +33,7 @@ jobs:
           echo "APP_DIR=$dir" >> "$GITHUB_ENV"
           echo "Building the app in: $dir"
 
-      - name: Set up Java 17
+      - name: Set up Java 21
         uses: actions/setup-java@v6
         with:
           distribution: temurin
