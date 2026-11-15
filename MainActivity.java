@@ -19,12 +19,16 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.speech.tts.TextToSpeech;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -32,6 +36,7 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -51,6 +56,7 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             refreshModelStatus();
+            refreshVoiceStatus();
             handler.postDelayed(this, 1000);
         }
     };
@@ -93,6 +99,16 @@ public class MainActivity extends Activity {
     private RadioButton normalOption;
     private RadioButton fastOption;
     private Speaker testSpeaker;
+    private RadioButton phoneVoiceOption;
+    private RadioButton aiVoiceOption;
+    private LinearLayout aiVoicePanel;
+    private EditText voiceKeyField;
+    private Spinner aiVoiceSpinner;
+    private Spinner moodSpinner;
+    private RadioButton bestQualityOption;
+    private RadioButton fastQualityOption;
+    private boolean syncingKeys;
+    private TextView aiVoiceStatus;
     private TextView statusView;
     private Button stopButton;
     private boolean waitingForOverlayPermission;
@@ -105,6 +121,8 @@ public class MainActivity extends Activity {
         setContentView(buildScreen());
 
         geminiKeyField.setText(prefs.geminiKey());
+        voiceKeyField.setText(prefs.geminiKey());
+        linkKeyFields(geminiKeyField, voiceKeyField);   // one Gemini key, shown in both places
         geminiModelField.setText(prefs.geminiModel());
         openAiKeyField.setText(prefs.openAiKey());
         openAiModelField.setText(prefs.openAiModel());
@@ -120,6 +138,11 @@ public class MainActivity extends Activity {
             default:
                 normalOption.setChecked(true);
         }
+        (Prefs.VOICE_AI.equals(prefs.voiceMode()) ? aiVoiceOption : phoneVoiceOption).setChecked(true);
+        aiVoicePanel.setVisibility(Prefs.VOICE_AI.equals(prefs.voiceMode()) ? View.VISIBLE : View.GONE);
+        aiVoiceSpinner.setSelection(indexOf(Speaker.AI_VOICES, prefs.aiVoiceName()));
+        moodSpinner.setSelection(indexOf(Speaker.AI_MOODS, prefs.aiVoiceMood()));
+        (Speaker.AI_MODEL_FAST.equals(prefs.aiVoiceModel()) ? fastQualityOption : bestQualityOption).setChecked(true);
         mobileDataBox.setChecked(prefs.downloadOverMobileData());
         (ModelStore.E4B.id.equals(prefs.onDeviceModel()) ? largeModelOption : smallModelOption).setChecked(true);
         switch (prefs.engine()) {
@@ -521,8 +544,9 @@ public class MainActivity extends Activity {
             });
         }
         testSpeaker.forgetProblems();
+        testSpeaker.retryAiVoice();
         String language = prefs.language();
-        testSpeaker.speak(Speaker.sample(language), language, prefs.speechRate(), true);
+        testSpeaker.speak(Speaker.sample(language), Speaker.Options.from(prefs, language), true);
     }
 
     private void showVoiceProblem(String message, boolean needsVoice) {
@@ -655,7 +679,24 @@ public class MainActivity extends Activity {
         readAloudBox.setOnCheckedChangeListener((box, checked) -> prefs.setReadAloud(checked));
         add(column, readAloudBox, 2, false);
         add(column, secondary("You can also tap 🔊 on any translation to hear it, or tap a line in the Live "
-                + "panel. It uses your phone's built-in voices, which work offline once installed."), 2, false);
+                + "panel."), 2, false);
+
+        add(column, label("Voice"), 12, false);
+        RadioGroup voices = new RadioGroup(this);
+        phoneVoiceOption = option("Phone voice");
+        aiVoiceOption = option("Natural AI voice (Gemini)");
+        voices.addView(phoneVoiceOption);
+        voices.addView(optionNote("Free and works offline. Clear, but sounds like a machine."));
+        voices.addView(aiVoiceOption);
+        voices.addView(optionNote("Sounds like a real person, with emotion that fits the words. Needs internet "
+                + "and a free Gemini key."));
+        phoneVoiceOption.setOnClickListener(v -> onVoiceModeChosen(Prefs.VOICE_PHONE));
+        aiVoiceOption.setOnClickListener(v -> onVoiceModeChosen(Prefs.VOICE_AI));
+        add(column, voices, 0, true);
+
+        aiVoicePanel = panel();
+        buildAiVoicePanel(aiVoicePanel);
+        add(column, aiVoicePanel, 8, true);
 
         add(column, label("Voice speed"), 12, false);
         RadioGroup speeds = new RadioGroup(this);
@@ -674,6 +715,12 @@ public class MainActivity extends Activity {
         Button testVoice = smallButton("Test voice", false);
         testVoice.setOnClickListener(v -> onTestVoice());
         add(column, testVoice, 6, false);
+
+        aiVoiceStatus = text("", 13);
+        aiVoiceStatus.setTextColor(Ui.isDark(this) ? 0xFFFFB74D : 0xFFB45309);
+        aiVoiceStatus.setLineSpacing(0, 1.15f);
+        aiVoiceStatus.setVisibility(View.GONE);
+        add(column, aiVoiceStatus, 4, false);
 
         statusView = text("", 15);
         add(column, statusView, 24, false);
@@ -756,6 +803,131 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         importParams.leftMargin = -Ui.dp(this, 12);
         panel.addView(importButton, importParams);
+    }
+
+    private void buildAiVoicePanel(LinearLayout panel) {
+        panel.addView(label("Gemini API key"));
+        voiceKeyField = field("Paste your free key", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        add(panel, voiceKeyField, 0, true);
+        add(panel, secondary("The same free key the Gemini translation engine uses. It's saved only on this "
+                + "phone."), 4, false);
+        panel.addView(link("Get a free Gemini key ↗", GEMINI_KEYS_URL), linkParams());
+
+        add(panel, label("Voice"), 10, false);
+        String[] voiceLabels = new String[Speaker.AI_VOICES.length];
+        for (int i = 0; i < voiceLabels.length; i++) {
+            voiceLabels[i] = Speaker.AI_VOICES[i][0] + " (" + Speaker.AI_VOICES[i][1] + ")";
+        }
+        aiVoiceSpinner = spinner(voiceLabels, position -> prefs.setAiVoiceName(Speaker.AI_VOICES[position][0]));
+        add(panel, aiVoiceSpinner, 0, true);
+
+        add(panel, label("Speaking style"), 10, false);
+        String[] moodLabels = new String[Speaker.AI_MOODS.length];
+        for (int i = 0; i < moodLabels.length; i++) {
+            moodLabels[i] = Speaker.AI_MOODS[i][1];
+        }
+        moodSpinner = spinner(moodLabels, position -> prefs.setAiVoiceMood(Speaker.AI_MOODS[position][0]));
+        add(panel, moodSpinner, 0, true);
+
+        add(panel, label("Quality"), 10, false);
+        RadioGroup quality = new RadioGroup(this);
+        quality.setOrientation(LinearLayout.HORIZONTAL);
+        bestQualityOption = option("Most natural");
+        fastQualityOption = option("Faster");
+        bestQualityOption.setOnClickListener(v -> prefs.setAiVoiceModel(Speaker.AI_MODEL_BEST));
+        fastQualityOption.setOnClickListener(v -> prefs.setAiVoiceModel(Speaker.AI_MODEL_FAST));
+        quality.addView(bestQualityOption);
+        quality.addView(fastQualityOption);
+        add(panel, quality, 0, false);
+
+        add(panel, secondary("Tap Test voice to hear it. Gemini's free tier allows a limited number of "
+                + "readings per minute and per day; when they run out, the phone voice takes over "
+                + "automatically. Google may use free-tier requests to improve its products."), 8, false);
+    }
+
+    /** Says so when the AI voice is resting because Google's free daily limit was reached. */
+    private void refreshVoiceStatus() {
+        if (aiVoiceStatus == null) {
+            return;
+        }
+        long until = Prefs.VOICE_AI.equals(prefs.voiceMode()) ? prefs.aiVoicePausedUntil(prefs.geminiKey()) : 0;
+        if (System.currentTimeMillis() < until) {
+            aiVoiceStatus.setText(Speaker.dailyLimitMessage(until) + " Tap Test voice to try the AI voice again now.");
+            aiVoiceStatus.setVisibility(View.VISIBLE);
+        } else {
+            aiVoiceStatus.setVisibility(View.GONE);
+        }
+    }
+
+    private void onVoiceModeChosen(String mode) {
+        prefs.setVoiceMode(mode);
+        aiVoicePanel.setVisibility(Prefs.VOICE_AI.equals(mode) ? View.VISIBLE : View.GONE);
+        refreshVoiceStatus();
+        if (testSpeaker != null) {
+            testSpeaker.stop();
+        }
+    }
+
+    /** Keeps the two Gemini key boxes (translation engine and AI voice) showing the same key. */
+    private void linkKeyFields(EditText first, EditText second) {
+        first.addTextChangedListener(copyTo(second));
+        second.addTextChangedListener(copyTo(first));
+    }
+
+    private TextWatcher copyTo(EditText other) {
+        return new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence text, int start, int count, int after) {
+                // Not needed.
+            }
+
+            @Override
+            public void onTextChanged(CharSequence text, int start, int before, int count) {
+                // Not needed.
+            }
+
+            @Override
+            public void afterTextChanged(Editable text) {
+                if (syncingKeys || other.getText().toString().equals(text.toString())) {
+                    return;
+                }
+                syncingKeys = true;
+                other.setText(text.toString());
+                syncingKeys = false;
+            }
+        };
+    }
+
+    private interface Choice {
+        void onChosen(int position);
+    }
+
+    private Spinner spinner(String[] labels, Choice choice) {
+        Spinner spinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                choice.onChosen(position);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+                // Keep the current choice.
+            }
+        });
+        return spinner;
+    }
+
+    private static int indexOf(String[][] table, String id) {
+        for (int i = 0; i < table.length; i++) {
+            if (table[i][0].equals(id)) {
+                return i;
+            }
+        }
+        return 0;
     }
 
     private void buildGeminiPanel(LinearLayout panel) {

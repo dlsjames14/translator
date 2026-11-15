@@ -35,16 +35,15 @@ the screen at once so it can follow meaning, tone and slang. Nothing is sent any
 
 1. Create a free account at **github.com**, then click **New repository** (name it e.g.
    `screen-translator`). Public is fine: no keys are stored in the code.
-2. On the new repository page, click **uploading an existing file** and drag in **everything inside**
-   the `ScreenTranslator` folder, then click **Commit changes**.
-   - The `.github` folder holds the build instructions. Its name starts with a dot, so most computers
-     hide it and it usually doesn't upload by drag-and-drop. If you don't see `.github` in the file
-     list, click **Add file → Create new file**, type the name `.github/workflows/build-apk.yml`
-     exactly (the slashes create the folders), paste in the contents of that file, and commit.
+2. Unzip `ScreenTranslator-repo.zip` and open the folder it creates. On the new repository page,
+   click **uploading an existing file**, drag in **everything inside** that folder (`app`, `gradle`,
+   `gradlew`, `README.md` and the rest), then click **Commit changes**.
+   - The `.github` folder holds the build instructions. Its name starts with a dot, so many computers
+     hide it and it may not upload. If you don't see `.github` in the repository's file list, add it
+     by hand: click **Add file → Create new file**, type the name `.github/workflows/build-apk.yml`
+     exactly (the slashes create the folders), paste in the build file from
+     [the end of this README](#the-build-file) (use the copy button on the box), and commit.
    - It's fine if the app ends up inside a folder: the build finds it automatically.
-   - Updating from an older version? Upload the new files over the old ones, and delete
-     `app/src/main/java/app/screentranslator/OpenAiClient.java` from the repository (it was
-     replaced).
 3. Open the **Actions** tab. A run called **Build APK** starts by itself (if not, click
    **Build APK → Run workflow**). The first build takes about 5 to 8 minutes.
 4. When it shows a green check, go back to the repository's main page and open **Releases**
@@ -141,7 +140,31 @@ more. The on-device AI is free but uses battery while it works.
 
 **Read aloud**
 
-Translations can be spoken with your phone's built-in voices, which work offline once installed.
+Translations can be read out loud, with one of two voices (choose under **Read aloud → Voice**):
+
+- **Phone voice:** your phone's built-in voice. Free and works offline once the language is
+  installed, but it sounds like a machine.
+- **Natural AI voice (Gemini):** Google's Gemini speech AI reads like a real person, with emotion
+  that fits the words: warm when friendly, excited when exciting, gentle when sad. It needs internet
+  and the same free Gemini key used by the Gemini translation engine (paste it in the box that
+  appears). Choose:
+  - **Voice:** 10 voices, e.g. Sulafat (warm), Achird (friendly), Vindemiatrix (gentle), Puck (upbeat).
+  - **Speaking style:** Natural (follows the feeling of the words), Warm and friendly, Calm and
+    gentle, or Lively and upbeat.
+  - **Quality:** Most natural (Gemini 3.8 Flash TTS) or Faster (Gemini 3.8 Flash-Lite TTS).
+
+  The audio streams in while Google is still creating it, so speaking usually starts a second or two
+  after the translation appears. If it still feels slow, choose **Faster** under Quality.
+
+  Gemini's free tier allows only a limited number of readings per minute and **per day** (Google
+  shows your exact limits in AI Studio; even the first paid tier allows only 100 per day). Each
+  reading uses one request, so Live mode with automatic reading uses the allowance fastest. When the
+  daily limit is reached, the app says so under **Test voice** and the phone voice reads instead
+  until the limit starts over at midnight Pacific time (5 PM Korea time in winter, 4 PM in summer).
+  If the internet drops or the per-minute limit is hit, the phone voice fills in for a minute.
+  Google may use free-tier requests to improve its products.
+
+How to use it:
 
 - Tap **🔊** on a translation card to hear it (tap **⏹** to stop). In the Live panel, tap any line
   to hear it.
@@ -149,9 +172,9 @@ Translations can be spoken with your phone's built-in voices, which work offline
   the app, or tap **🔇** in the Live panel (it turns into **🔊**). In Live mode, new lines are read one
   after another; if they arrive faster than they can be read, it skips ahead to the newest ones.
 - Other sound, like a video, is turned down while a translation is read.
-- Choose **Slow**, **Normal** or **Fast** under **Voice speed**, and tap **Test voice** to hear a
-  sample in your target language. If the phone has no voice for that language, the app offers to
-  open the voice settings, where you can download one for free.
+- **Voice speed** (Slow, Normal, Fast) works with both voices. **Test voice** plays a sample in your
+  target language with the voice you chose. If the phone voice has no voice for that language, the
+  app offers to open the voice settings, where you can download one for free.
 
 **Settings**
 
@@ -181,6 +204,7 @@ Translations can be spoken with your phone's built-in voices, which work offline
 | "You've used today's free Gemini allowance" | Wait until tomorrow, or switch to the on-device AI. |
 | "OpenAI didn't accept your API key" | Paste the key again (no spaces). Create a new key if needed. |
 | "Your OpenAI account is out of credit" | Add credit under Settings → Billing on platform.openai.com. |
+| The natural AI voice stopped and the phone voice reads instead | Google's free daily limit for the AI voice is used up. The app shows when it starts over (under Test voice); until then the phone voice reads. Using the AI voice less in Live mode makes the allowance last longer. |
 | Nothing is read aloud, or "no … voice installed" | In the app, tap **Test voice**, then **Install voices**, and download the language. If there's no voice app at all, install **Speech Services by Google** from the Play Store. |
 | "Display over other apps" switch is greyed out | Settings → Apps → Screen Translator → ⋮ (top right) → **Allow restricted settings**, then try again. |
 | The Actions run fails | Open the failed run, click the red step, and read the last lines of the log. |
@@ -203,7 +227,8 @@ arm64 code only.
 | `ModelStore.java` | Downloads, imports, checks and deletes the on-device model files. |
 | `Prompts.java` | All instructions given to the AI, and the code that reads its answers. |
 | `LivePanel.java`, `SelectionView.java` | The Live panel and the drag-a-box layer. |
-| `Speaker.java` | Reads translations aloud with Android's text-to-speech: picks the voice from the language name, splits long text, turns other sound down while speaking. |
+| `Speaker.java` | Reads translations aloud: the phone voice (Android text-to-speech, voice picked from the language name) or the AI voice, with automatic fallback; turns other sound down while speaking. |
+| `AiVoice.java` | The natural AI voice: streams Gemini 3.8 TTS audio and plays it as it arrives (style sent separately so it isn't read aloud); a short first piece starts speech sooner, and the next piece is generated while the current one plays. |
 | `Prefs.java`, `EngineSettings.java` | Saved settings, and the snapshot each translation uses. |
 
 To change how translations are worded, edit `Prompts.java`. Live mode's timing and sensitivity are
@@ -212,3 +237,76 @@ the `LIVE_*` constants at the top of `TranslatorService.java`, and each engine's
 
 Gemma 4 is released by Google under the Apache License 2.0. The translate icon is from Google's
 Material Icons (Apache License 2.0).
+
+## The build file
+
+This is the content of `.github/workflows/build-apk.yml`. Copy it from here if the `.github` folder
+didn't upload (see step 1 above).
+
+```yaml
+# Builds the Android app in the cloud every time you push (or when you press
+# "Run workflow" on the Actions tab), then publishes ScreenTranslator.apk on
+# the repository's Releases page so you can download it straight to your phone.
+# The app can be at the top of the repository or inside any folder: it's found automatically.
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Find the app folder
+        run: |
+          settings=$(find . -name settings.gradle.kts -not -path './.git/*' | awk '{ print length, $0 }' | sort -n | head -n 1 | cut -d' ' -f2-)
+          if [ -z "$settings" ]; then
+            echo "::error::Couldn't find the app in this repository (no settings.gradle.kts file)."
+            exit 1
+          fi
+          dir=$(dirname "$settings")
+          if [ ! -f "$dir/gradlew" ]; then
+            echo "::error::Found the app in $dir, but the gradlew file is missing there."
+            exit 1
+          fi
+          echo "APP_DIR=$dir" >> "$GITHUB_ENV"
+          echo "Building the app in: $dir"
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"   # the on-device AI library needs Java 21 to build
+
+      - name: Build the APK
+        run: |
+          cd "$APP_DIR"
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/ScreenTranslator.apk"
+
+      - name: Keep a copy with this run
+        uses: actions/upload-artifact@v7
+        with:
+          name: ScreenTranslator-apk
+          path: ScreenTranslator.apk
+
+      - name: Publish on the Releases page
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk --repo "${{ github.repository }}" --yes --cleanup-tag || true
+          gh release create apk ScreenTranslator.apk \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Screen Translator (build ${{ github.run_number }})" \
+            --notes "Open this page on your Android phone, tap ScreenTranslator.apk to download it, then open the file to install." \
+            --latest
+```

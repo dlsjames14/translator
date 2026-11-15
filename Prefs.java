@@ -10,6 +10,9 @@ final class Prefs {
     static final String ENGINE_GEMINI = "gemini";
     static final String ENGINE_OPENAI = "openai";
 
+    static final String VOICE_PHONE = "phone";
+    static final String VOICE_AI = "gemini";
+
     static final String DEFAULT_OPENAI_MODEL = "gpt-6-luna";
     static final String DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite";
     static final String DEFAULT_LANGUAGE = "English";
@@ -28,6 +31,12 @@ final class Prefs {
     private static final String KEY_DOWNLOAD_PREFIX = "download_id_";
     private static final String KEY_READ_ALOUD = "read_aloud";
     private static final String KEY_SPEECH_RATE = "speech_rate";
+    private static final String KEY_VOICE_MODE = "voice_mode";
+    private static final String KEY_AI_VOICE_NAME = "ai_voice_name";
+    private static final String KEY_AI_VOICE_MODEL = "ai_voice_model";
+    private static final String KEY_AI_VOICE_MOOD = "ai_voice_mood";
+    private static final String KEY_AI_PAUSED_UNTIL = "ai_voice_paused_until";
+    private static final String KEY_AI_PAUSED_FOR = "ai_voice_paused_for";
 
     private final SharedPreferences store;
 
@@ -106,6 +115,76 @@ final class Prefs {
 
     void setSpeechRate(String rate) {
         store.edit().putString(KEY_SPEECH_RATE, rate).apply();
+    }
+
+    /** VOICE_PHONE (built-in voice) or VOICE_AI (natural Gemini voice). */
+    String voiceMode() {
+        return VOICE_AI.equals(store.getString(KEY_VOICE_MODE, VOICE_PHONE)) ? VOICE_AI : VOICE_PHONE;
+    }
+
+    void setVoiceMode(String mode) {
+        store.edit().putString(KEY_VOICE_MODE, mode).apply();
+    }
+
+    String aiVoiceName() {
+        String value = store.getString(KEY_AI_VOICE_NAME, "");
+        for (String[] voice : Speaker.AI_VOICES) {
+            if (voice[0].equals(value)) {
+                return value;
+            }
+        }
+        return Speaker.AI_VOICES[0][0];
+    }
+
+    void setAiVoiceName(String name) {
+        store.edit().putString(KEY_AI_VOICE_NAME, name).apply();
+    }
+
+    String aiVoiceModel() {
+        String value = store.getString(KEY_AI_VOICE_MODEL, Speaker.AI_MODEL_BEST);
+        return Speaker.AI_MODEL_FAST.equals(value) ? Speaker.AI_MODEL_FAST : Speaker.AI_MODEL_BEST;
+    }
+
+    void setAiVoiceModel(String model) {
+        store.edit().putString(KEY_AI_VOICE_MODEL, model).apply();
+    }
+
+    String aiVoiceMood() {
+        String value = store.getString(KEY_AI_VOICE_MOOD, "");
+        for (String[] mood : Speaker.AI_MOODS) {
+            if (mood[0].equals(value)) {
+                return value;
+            }
+        }
+        return Speaker.AI_MOODS[0][0];
+    }
+
+    void setAiVoiceMood(String mood) {
+        store.edit().putString(KEY_AI_VOICE_MOOD, mood).apply();
+    }
+
+    /**
+     * Until when (wall-clock ms) the AI voice rests because this key used up Google's daily limit;
+     * 0 if it doesn't.
+     */
+    long aiVoicePausedUntil(String key) {
+        if (!keyTag(key).equals(store.getString(KEY_AI_PAUSED_FOR, ""))) {
+            return 0;
+        }
+        return store.getLong(KEY_AI_PAUSED_UNTIL, 0);
+    }
+
+    void setAiVoicePaused(String key, long untilMs) {
+        store.edit().putString(KEY_AI_PAUSED_FOR, keyTag(key)).putLong(KEY_AI_PAUSED_UNTIL, untilMs).apply();
+    }
+
+    void clearAiVoicePause() {
+        store.edit().remove(KEY_AI_PAUSED_FOR).remove(KEY_AI_PAUSED_UNTIL).apply();
+    }
+
+    /** Tells keys apart without storing the key a second time. */
+    private static String keyTag(String key) {
+        return key == null || key.isEmpty() ? "" : Integer.toHexString(key.trim().hashCode());
     }
 
     long downloadId(String modelId) {

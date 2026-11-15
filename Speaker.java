@@ -7,6 +7,7 @@ import android.media.AudioManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 
@@ -15,8 +16,10 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Reads translations aloud with the phone's built-in text-to-speech voices (offline once a voice is
- * installed). Other sound, like a video, is turned down while it speaks. Use on the main thread.
+ * Reads translations aloud, either with the phone's built-in text-to-speech voices (offline once a
+ * voice is installed) or with the natural AI voice ({@link AiVoice}). If the AI voice can't be used
+ * (no key, limit reached, no internet), the phone voice takes over automatically. Other sound, like a
+ * video, is turned down while it speaks. Use on the main thread.
  */
 final class Speaker {
 
@@ -31,14 +34,88 @@ final class Speaker {
         void onProblem(String message, boolean needsVoice);
     }
 
+    /** Which voice to use and how, taken from the settings. */
+    static final class Options {
+        final String language;
+        final String rate;
+        final boolean aiVoice;
+        final String geminiKey;
+        final String aiModel;
+        final String aiVoiceName;
+        final String aiMood;
+
+        Options(String language, String rate, boolean aiVoice, String geminiKey, String aiModel, String aiVoiceName,
+                String aiMood) {
+            this.language = language == null ? "" : language;
+            this.rate = rate;
+            this.aiVoice = aiVoice;
+            this.geminiKey = geminiKey == null ? "" : geminiKey.trim();
+            this.aiModel = aiModel;
+            this.aiVoiceName = aiVoiceName;
+            this.aiMood = aiMood;
+        }
+
+        static Options from(Prefs prefs, String language) {
+            return new Options(language, prefs.speechRate(), Prefs.VOICE_AI.equals(prefs.voiceMode()),
+                    prefs.geminiKey(), prefs.aiVoiceModel(), prefs.aiVoiceName(), prefs.aiVoiceMood());
+        }
+
+        /** How the AI voice should sound, e.g. "warm, kind and friendly, speaking slowly". */
+        String style() {
+            String style = AI_MOODS[0][2];
+            for (String[] mood : AI_MOODS) {
+                if (mood[0].equals(aiMood)) {
+                    style = mood[2];
+                }
+            }
+            if (RATE_SLOW.equals(rate)) {
+                style += ", speaking slowly";
+            } else if (RATE_FAST.equals(rate)) {
+                style += ", speaking quickly";
+            }
+            return style;
+        }
+    }
+
     static final String RATE_SLOW = "slow";
     static final String RATE_NORMAL = "normal";
     static final String RATE_FAST = "fast";
 
+    static final String AI_MODEL_BEST = "gemini-3.8-flash-tts";
+    static final String AI_MODEL_FAST = "gemini-3.8-flash-lite-tts";
+
+    /** Gemini voices offered in the settings: name, character. */
+    static final String[][] AI_VOICES = {
+            {"Sulafat", "warm"},
+            {"Achird", "friendly"},
+            {"Vindemiatrix", "gentle"},
+            {"Aoede", "breezy"},
+            {"Puck", "upbeat"},
+            {"Leda", "youthful"},
+            {"Algieba", "smooth"},
+            {"Charon", "informative"},
+            {"Sadachbia", "lively"},
+            {"Kore", "firm"},
+    };
+
+    /** Speaking styles: id, label in the settings, instruction for the AI voice. */
+    static final String[][] AI_MOODS = {
+            {"natural", "Natural (follows the feeling of the words)",
+                    "natural and expressive, with emotion that follows the meaning of the words"},
+            {"warm", "Warm and friendly", "warm, kind and friendly"},
+            {"calm", "Calm and gentle", "calm, gentle and clear"},
+            {"lively", "Lively and upbeat", "lively, upbeat and enthusiastic"},
+    };
+
     /** When this many pieces are still waiting to be spoken, Live mode skips ahead to the newest text. */
     private static final int MAX_BACKLOG = 8;
+    private static final int MAX_AI_BACKLOG = 3;
+    // One request per reading where possible: Google's daily limit counts requests, and streaming
+    // already makes long text start quickly.
+    private static final int AI_PIECE_LENGTH = 1200;
+    private static final long REPEAT_PROBLEM_MS = 5 * 60_000L;
 
-    private static final AudioAttributes SPEECH = new AudioAttributes.Builder()
+    static final AudioAttributes SPEECH = new AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ASSISTANT)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build();
@@ -95,17 +172,28 @@ final class Speaker {
     private final AudioManager audio;
     private final AudioFocusRequest focus;
 
+    // Phone voice
     private TextToSpeech tts;
     private boolean ready;
     private boolean failed;
-    private boolean speaking;
-    private boolean hasFocus;
+    private boolean phoneActive;
     private int counter;
     private int backlog;
     private String lastId;
     private String appliedLanguage;
     private float appliedRate = -1f;
+
+    // AI voice
+    private AiVoice ai;
+    private boolean aiActive;
+    private Options aiOptions;
+    private long aiBlockedUntil;
+    private String aiBlockedKey = "";
+
+    private boolean speaking;
+    private boolean hasFocus;
     private String lastProblem;
+    private long lastProblemAt;
 
     Speaker(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -126,14 +214,147 @@ final class Speaker {
     }
 
     /**
-     * Speaks the text in the given language.
+     * Reads the text aloud.
      *
      * @param replace true to stop whatever is being said first; false to say it afterwards
      */
-    void speak(String text, String language, String rate, boolean replace) {
+    void speak(String text, Options options, boolean replace) {
         if (text == null || text.trim().isEmpty()) {
             return;
         }
+        if (options.aiVoice && aiAllowed(options) && (replace || !phoneActive)) {
+            speakAi(text, options, replace);
+        } else {
+            if (replace && ai != null) {
+                ai.stop();
+                aiActive = false;
+            }
+            speakPhone(text, options.language, options.rate, replace);
+        }
+    }
+
+    void stop() {
+        waiting.clear();
+        if (tts != null && ready) {
+            tts.stop();
+        }
+        if (ai != null) {
+            ai.stop();
+        }
+        aiActive = false;
+        phoneFinished();
+    }
+
+    void shutdown() {
+        waiting.clear();
+        if (ai != null) {
+            ai.close();
+            ai = null;
+        }
+        aiActive = false;
+        if (tts != null) {
+            try {
+                tts.stop();
+                tts.shutdown();
+            } catch (RuntimeException ignored) {
+                // Already shut down.
+            }
+            tts = null;
+        }
+        ready = false;
+        phoneFinished();
+    }
+
+    /** Lets the AI voice be tried again right away (e.g. after the key was changed). */
+    void retryAiVoice() {
+        aiBlockedUntil = 0;
+        new Prefs(context).clearAiVoicePause();
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // AI voice
+
+    private boolean aiAllowed(Options options) {
+        if (options.geminiKey.isEmpty()) {
+            problem("To use the natural AI voice, paste your free Gemini key under Read aloud in the Screen "
+                    + "Translator app. Using the phone voice for now.");
+            return false;
+        }
+        if (!options.geminiKey.equals(aiBlockedKey)) {
+            aiBlockedUntil = 0;   // a different key: try again
+        }
+        if (SystemClock.uptimeMillis() < aiBlockedUntil) {
+            return false;
+        }
+        long pausedUntil = new Prefs(context).aiVoicePausedUntil(options.geminiKey);
+        if (System.currentTimeMillis() < pausedUntil) {
+            problem(dailyLimitMessage(pausedUntil));
+            return false;
+        }
+        return true;
+    }
+
+    static String dailyLimitMessage(long untilMs) {
+        return "The natural AI voice has used today's free limit from Google, so the phone voice reads "
+                + "instead until about " + GeminiQuota.timeText(untilMs) + ", when the limit starts over.";
+    }
+
+    private void speakAi(String text, Options options, boolean replace) {
+        if (ai == null) {
+            ai = new AiVoice(new AiVoice.Callback() {
+                @Override
+                public void onAllDone() {
+                    aiActive = false;
+                    updateSpeaking();
+                }
+
+                @Override
+                public void onFailed(String unread, TranslateException error) {
+                    aiFailed(unread, error);
+                }
+            });
+        }
+        if (replace) {
+            waiting.clear();
+            if (tts != null && ready) {
+                tts.stop();
+            }
+            phoneFinished();
+            ai.stop();
+        } else if (ai.backlog() > MAX_AI_BACKLOG) {
+            ai.stop();   // falling behind: skip ahead to the newest text
+        }
+        aiOptions = options;
+        ai.speak(aiPieces(text), options);
+        aiActive = true;
+        updateSpeaking();
+    }
+
+    private void aiFailed(String unread, TranslateException error) {
+        aiActive = false;
+        Options options = aiOptions;
+        String key = options == null ? "" : options.geminiKey;
+        if (error.dailyLimit) {
+            long until = GeminiQuota.nextReset(System.currentTimeMillis());
+            new Prefs(context).setAiVoicePaused(key, until);   // remembered even if the app restarts
+            problem(dailyLimitMessage(until));
+        } else {
+            aiBlockedKey = key;
+            aiBlockedUntil = error.fatal ? Long.MAX_VALUE
+                    : SystemClock.uptimeMillis() + Math.max(60_000L, error.retryAfterMs);
+            problem("Natural AI voice: " + error.getMessage() + " Using the phone voice "
+                    + (error.fatal ? "instead." : "for a minute."));
+        }
+        if (options != null) {
+            speakPhone(unread, options.language, options.rate, false);
+        }
+        updateSpeaking();
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // Phone voice
+
+    private void speakPhone(String text, String language, String rate, boolean replace) {
         if (failed) {
             problem(noEngineMessage(), true);
             return;
@@ -170,35 +391,10 @@ final class Speaker {
             }
         }
         if (backlog > 0) {
-            takeFocus();
-            setSpeaking(true);
+            phoneActive = true;
+            updateSpeaking();
         }
     }
-
-    void stop() {
-        waiting.clear();
-        if (tts != null && ready) {
-            tts.stop();
-        }
-        finished();
-    }
-
-    void shutdown() {
-        waiting.clear();
-        if (tts != null) {
-            try {
-                tts.stop();
-                tts.shutdown();
-            } catch (RuntimeException ignored) {
-                // Already shut down.
-            }
-            tts = null;
-        }
-        ready = false;
-        finished();
-    }
-
-    // ----------------------------------------------------------------------------------------
 
     private void start() {
         tts = new TextToSpeech(context, status -> main.post(() -> onReady(status)));
@@ -251,7 +447,7 @@ final class Speaker {
         List<String[]> queued = new ArrayList<>(waiting);
         waiting.clear();
         for (String[] item : queued) {
-            speak(item[0], item[1], item[2], false);
+            speakPhone(item[0], item[1], item[2], false);
         }
     }
 
@@ -260,8 +456,15 @@ final class Speaker {
             backlog--;
         }
         if (id != null && id.equals(lastId)) {
-            finished();
+            phoneFinished();
         }
+    }
+
+    private void phoneFinished() {
+        backlog = 0;
+        lastId = null;
+        phoneActive = false;
+        updateSpeaking();
     }
 
     private boolean useLanguage(String language) {
@@ -285,26 +488,18 @@ final class Speaker {
         return true;
     }
 
-    private void takeFocus() {
-        if (!hasFocus) {
+    /** Turns other sound down while speaking, and back up when done. */
+    private void updateSpeaking() {
+        boolean now = phoneActive || aiActive;
+        if (now && !hasFocus) {
             hasFocus = audio.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
-        }
-    }
-
-    private void finished() {
-        backlog = 0;
-        lastId = null;
-        if (hasFocus) {
+        } else if (!now && hasFocus) {
             audio.abandonAudioFocusRequest(focus);
             hasFocus = false;
         }
-        setSpeaking(false);
-    }
-
-    private void setSpeaking(boolean value) {
-        if (speaking != value) {
-            speaking = value;
-            listener.onSpeakingChanged(value);
+        if (speaking != now) {
+            speaking = now;
+            listener.onSpeakingChanged(now);
         }
     }
 
@@ -313,8 +508,10 @@ final class Speaker {
     }
 
     private void problem(String message, boolean needsVoice) {
-        if (!message.equals(lastProblem)) {
+        long now = SystemClock.uptimeMillis();
+        if (!message.equals(lastProblem) || now - lastProblemAt > REPEAT_PROBLEM_MS) {
             lastProblem = message;
+            lastProblemAt = now;
             listener.onProblem(message, needsVoice);
         }
     }
@@ -403,6 +600,11 @@ final class Speaker {
             }
         }
         return out.length() > 0 ? out.toString() : text;
+    }
+
+    /** Pieces for the AI voice: as few as possible, since each one is a request to Google. */
+    static List<String> aiPieces(String text) {
+        return pieces(text, AI_PIECE_LENGTH);
     }
 
     /** Splits long text into pieces the voice engine accepts, at line and sentence breaks where possible. */
